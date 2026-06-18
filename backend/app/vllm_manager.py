@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 
 # Model types that need TRITON_ATTN because flashinfer doesn't support head_dim=256.
 _TRITON_ATTN_MODEL_TYPES = {"qwen3_5", "qwen3-5", "qwen3.5"}
+_DIFFUSION_GEMMA_MODEL_TYPES = {"diffusion_gemma"}
 
 # Substrings (lower-cased) that indicate a fatal error in the engine log.
 _ERROR_MARKERS = (
@@ -561,9 +562,26 @@ class VLLMManager:
         if model_type in _TRITON_ATTN_MODEL_TYPES and "--attention-backend" not in extra:
             extra += ["--attention-backend", "TRITON_ATTN"]
             logger.info("auto-adding --attention-backend TRITON_ATTN for model_type=%s", model_type)
+        if model_type in _DIFFUSION_GEMMA_MODEL_TYPES:
+            extra = self._with_diffusion_gemma_args(extra)
         if extra:
             argv += extra
         return argv
+
+    def _with_diffusion_gemma_args(self, extra: list[str]) -> list[str]:
+        updated = list(extra)
+        additions = [
+            ("--attention-backend", "TRITON_ATTN"),
+            ("--generation-config", "vllm"),
+            ("--hf-overrides", '{"diffusion_sampler":"entropy_bound","diffusion_entropy_bound":0.1}'),
+            ("--diffusion-config", '{"canvas_length":256}'),
+        ]
+        for key, value in additions:
+            if key not in updated:
+                updated += [key, value]
+        if "--enable-chunked-prefill" not in updated:
+            updated.append("--enable-chunked-prefill")
+        return updated
 
     def _remove_container(self) -> None:
         try:

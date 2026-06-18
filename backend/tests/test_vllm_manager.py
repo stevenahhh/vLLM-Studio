@@ -144,6 +144,33 @@ class VLLMManagerRunnerTests(unittest.TestCase):
 
         self.assertIn("/models/local-qwen:/models/local-qwen:ro", argv)
 
+    def test_diffusion_gemma_adds_required_server_args(self) -> None:
+        req = LoadRequest(
+            repo="google/diffusiongemma-26B-A4B-it",
+            revision="main",
+            dtype="float16",
+            tensor_parallel_size=1,
+            gpu_memory_utilization=0.85,
+            max_model_len=262144,
+            max_num_seqs=4,
+        )
+        with (
+            mock.patch.object(config, "VLLM_ENGINE_RUNNER", "process"),
+            mock.patch.object(VLLMManager, "_model_type", return_value="diffusion_gemma"),
+        ):
+            manager = VLLMManager()
+            argv = manager._build_argv(req, "google/diffusiongemma-26B-A4B-it", "diffusiongemma")
+
+        self.assertIn("--attention-backend", argv)
+        self.assertEqual(argv[argv.index("--attention-backend") + 1], "TRITON_ATTN")
+        self.assertIn("--generation-config", argv)
+        self.assertEqual(argv[argv.index("--generation-config") + 1], "vllm")
+        self.assertIn("--hf-overrides", argv)
+        self.assertIn("diffusion_sampler", argv[argv.index("--hf-overrides") + 1])
+        self.assertIn("--diffusion-config", argv)
+        self.assertIn("canvas_length", argv[argv.index("--diffusion-config") + 1])
+        self.assertIn("--enable-chunked-prefill", argv)
+
 
 if __name__ == "__main__":
     unittest.main()

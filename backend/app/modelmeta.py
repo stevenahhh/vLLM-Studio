@@ -66,6 +66,7 @@ _CONFIG_KEEP_KEYS = (
     "is_encoder_decoder",
     "rope_theta",
     "sliding_window",
+    "canvas_length",
 )
 
 
@@ -264,14 +265,14 @@ def _estimate_param_count(
     else:
         mlp = 2 * h * inter
 
-    # MoE: all experts resident -> multiply expert MLP by expert count.
-    if family == "moe":
-        n_experts = _first_int(
-            config, "num_experts", "num_local_experts", "n_routed_experts", default=0
-        )
+    n_experts = _first_int(
+        config, "num_experts", "num_local_experts", "n_routed_experts", default=0
+    )
+    has_routed_experts = n_experts > 1
+    if has_routed_experts:
         moe_inter = _first_int(config, "moe_intermediate_size", default=0) or inter
         expert_mlp = (3 * h * moe_inter) if is_gated else (2 * h * moe_inter)
-        mlp = expert_mlp * max(n_experts, 1)
+        mlp = expert_mlp * n_experts
         # Some MoE arches keep a dense shared expert alongside routed experts.
         shared_inter = _first_int(config, "shared_expert_intermediate_size", default=0)
         if shared_inter > 0:
@@ -416,6 +417,137 @@ def _trim_config(config: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _core_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Return the config block that owns language-model dimensions."""
+    text_config = config.get("text_config")
+    if isinstance(text_config, dict):
+        model_type = str(config.get("model_type", "")).lower()
+        if model_type in {"diffusion_gemma"}:
+            merged = dict(text_config)
+            merged["model_type"] = config.get("model_type", text_config.get("model_type", ""))
+            merged["architectures"] = config.get("architectures", text_config.get("architectures", []))
+            merged["tie_word_embeddings"] = config.get(
+                "tie_word_embeddings", text_config.get("tie_word_embeddings")
+            )
+            merged["torch_dtype"] = config.get(
+                "torch_dtype", config.get("dtype", text_config.get("torch_dtype", ""))
+            )
+            if "canvas_length" in config:
+                merged["block_length"] = config["canvas_length"]
+            return merged
+    return config
+
+
+def _meta_from_config(
+    *,
+    repo: str,
+    revision: str,
+    quant: str,
+    config: dict[str, Any],
+    weight_bytes_known: Optional[int],
+    warnings: list[str],
+) -> ModelMeta:
+    core = _core_config(config)
+
+    model_type = str(config.get("model_type", core.get("model_type", "")) or "")
+    architectures = _as_list(config.get("architectures") or core.get("architectures"))
+    hidden_size = _first_int(core, "hidden_size", "n_embd", "d_model", default=0)
+    num_hidden_layers = _first_int(
+        core, "num_hidden_layers", "n_layer", "num_layers", default=0
+    )
+    num_attention_heads = _first_int(
+        core, "num_attention_heads", "n_head", "num_heads", default=0
+    )
+    num_key_value_heads = _first_int(
+        core, "num_key_value_heads", "num_kv_heads", default=0
+    )
+    if num_key_value_heads <= 0:
+        num_key_value_heads = num_attention_heads
+
+    head_dim = _first_int(core, "head_dim", default=0)
+    if head_dim <= 0 and num_attention_heads > 0 and hidden_size > 0:
+        head_dim = hidden_size // num_attention_heads
+
+    intermediate_size = _first_int(
+        core, "intermediate_size", "ffn_dim", "n_inner", default=0
+    )
+    vocab_size = _first_int(core, "vocab_size", default=0)
+    max_position_embeddings = _first_int(
+        core,
+        "max_position_embeddings",
+        "n_positions",
+        "max_sequence_length",
+        "seq_length",
+        default=0,
+    )
+
+    tie_raw = core.get("tie_word_embeddings")
+    tie_word_embeddings = True if tie_raw is None else bool(tie_raw)
+
+    torch_dtype = str(core.get("torch_dtype") or core.get("dtype") or "")
+
+    family: Family = detect_family(config, repo)
+
+    num_experts = _first_int(
+        core, "num_experts", "num_local_experts", "n_routed_experts", default=0
+    )
+
+    is_gated = _detect_gated(core, architectures)
+
+    resolved_quant = quant or "none"
+    if resolved_quant in ("auto", "none"):
+        detected = detect_quant_from_config(config, repo)
+        if detected != "none":
+            resolved_quant = detected
+        elif resolved_quant == "auto":
+            resolved_quant = "none"
+
+    param_count = _estimate_param_count(
+        core,
+        hidden_size=hidden_size,
+        num_hidden_layers=num_hidden_layers,
+        num_attention_heads=num_attention_heads,
+        num_key_value_heads=num_key_value_heads,
+        head_dim=head_dim,
+        intermediate_size=intermediate_size,
+        vocab_size=vocab_size,
+        tie_word_embeddings=tie_word_embeddings,
+        is_gated=is_gated,
+        family=family,
+    )
+
+    if hidden_size <= 0 or num_hidden_layers <= 0:
+        warnings.append(
+            "config.json missing core dims (hidden_size/num_hidden_layers); "
+            "param estimate may be unreliable."
+        )
+
+    return ModelMeta(
+        repo=repo,
+        revision=revision,
+        quant=resolved_quant,
+        family=family,
+        model_type=model_type,
+        architectures=architectures,
+        hidden_size=hidden_size,
+        num_hidden_layers=num_hidden_layers,
+        num_attention_heads=num_attention_heads,
+        num_key_value_heads=num_key_value_heads,
+        head_dim=head_dim,
+        intermediate_size=intermediate_size,
+        vocab_size=vocab_size,
+        max_position_embeddings=max_position_embeddings,
+        tie_word_embeddings=tie_word_embeddings,
+        torch_dtype=torch_dtype,
+        num_experts=num_experts,
+        param_count=param_count,
+        weight_bytes_known=weight_bytes_known,
+        is_gated=is_gated,
+        config_raw=_trim_config(core),
+        warnings=warnings,
+    )
+
+
 # ---------------------------------------------------------------------------
 # public: get_meta
 # ---------------------------------------------------------------------------
@@ -465,53 +597,7 @@ def get_meta(
 
     config = config or {}
 
-    # --- parse fields ------------------------------------------------------
-    model_type = str(config.get("model_type", "") or "")
-    architectures = _as_list(config.get("architectures"))
-    hidden_size = _first_int(config, "hidden_size", "n_embd", "d_model", default=0)
-    num_hidden_layers = _first_int(
-        config, "num_hidden_layers", "n_layer", "num_layers", default=0
-    )
-    num_attention_heads = _first_int(
-        config, "num_attention_heads", "n_head", "num_heads", default=0
-    )
-    num_key_value_heads = _first_int(
-        config, "num_key_value_heads", "num_kv_heads", default=0
-    )
-    if num_key_value_heads <= 0:
-        num_key_value_heads = num_attention_heads
-
-    head_dim = _first_int(config, "head_dim", default=0)
-    if head_dim <= 0 and num_attention_heads > 0 and hidden_size > 0:
-        head_dim = hidden_size // num_attention_heads
-
-    intermediate_size = _first_int(
-        config, "intermediate_size", "ffn_dim", "n_inner", default=0
-    )
-    vocab_size = _first_int(config, "vocab_size", default=0)
-    max_position_embeddings = _first_int(
-        config,
-        "max_position_embeddings",
-        "n_positions",
-        "max_sequence_length",
-        "seq_length",
-        default=0,
-    )
-
-    tie_raw = config.get("tie_word_embeddings")
-    tie_word_embeddings = True if tie_raw is None else bool(tie_raw)
-
-    torch_dtype = str(config.get("torch_dtype", "") or "")
-
-    family: Family = detect_family(config, repo)
-
-    num_experts = _first_int(
-        config, "num_experts", "num_local_experts", "n_routed_experts", default=0
-    )
-
-    is_gated = _detect_gated(config, architectures)
-
-    # --- quant resolution --------------------------------------------------
+    # --- weight bytes known ------------------------------------------------
     resolved_quant = quant or "none"
     if resolved_quant in ("auto", "none"):
         detected = detect_quant_from_config(config, repo)
@@ -520,22 +606,6 @@ def get_meta(
         elif resolved_quant == "auto":
             resolved_quant = "none"
 
-    # --- param count -------------------------------------------------------
-    param_count = _estimate_param_count(
-        config,
-        hidden_size=hidden_size,
-        num_hidden_layers=num_hidden_layers,
-        num_attention_heads=num_attention_heads,
-        num_key_value_heads=num_key_value_heads,
-        head_dim=head_dim,
-        intermediate_size=intermediate_size,
-        vocab_size=vocab_size,
-        tie_word_embeddings=tie_word_embeddings,
-        is_gated=is_gated,
-        family=family,
-    )
-
-    # --- weight bytes known ------------------------------------------------
     weight_bytes_known: Optional[int] = None
     if local:
         weight_bytes_known = _sum_local_weight_bytes(repo, revision, resolved_quant)
@@ -551,33 +621,11 @@ def get_meta(
                 "Weight-file sizes unavailable; estimate will use config-derived params."
             )
 
-    if hidden_size <= 0 or num_hidden_layers <= 0:
-        warnings.append(
-            "config.json missing core dims (hidden_size/num_hidden_layers); "
-            "param estimate may be unreliable."
-        )
-
-    return ModelMeta(
+    return _meta_from_config(
         repo=repo,
         revision=revision,
         quant=resolved_quant,
-        family=family,
-        model_type=model_type,
-        architectures=architectures,
-        hidden_size=hidden_size,
-        num_hidden_layers=num_hidden_layers,
-        num_attention_heads=num_attention_heads,
-        num_key_value_heads=num_key_value_heads,
-        head_dim=head_dim,
-        intermediate_size=intermediate_size,
-        vocab_size=vocab_size,
-        max_position_embeddings=max_position_embeddings,
-        tie_word_embeddings=tie_word_embeddings,
-        torch_dtype=torch_dtype,
-        num_experts=num_experts,
-        param_count=param_count,
+        config=config,
         weight_bytes_known=weight_bytes_known,
-        is_gated=is_gated,
-        config_raw=_trim_config(config),
         warnings=warnings,
     )

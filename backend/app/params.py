@@ -424,6 +424,8 @@ def _diffusion_group(meta: ModelMeta) -> ParamGroup:
         "Diffusion LMs are non-autoregressive; vLLM support is experimental — "
         "params are passed via extra_body."
     )
+    model_type = str(getattr(meta, "model_type", "") or "")
+    block_length_default = 256 if model_type == "diffusion_gemma" else 32
     params: list[ParamSpec] = [
         ParamSpec(
             key="diffusion_steps",
@@ -439,7 +441,7 @@ def _diffusion_group(meta: ModelMeta) -> ParamGroup:
             key="block_length",
             label="Block length",
             type="int",
-            default=32,
+            default=block_length_default,
             min=1,
             max=2048,
             step=1,

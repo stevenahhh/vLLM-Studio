@@ -176,6 +176,48 @@ Docker mode는 NVIDIA GPU, host IPC, `8001` 포트, 설정된 Hugging Face cache
 사용합니다. `HF_TOKEN`이 설정되어 있으면 launch log에 값을 쓰지 않고 environment
 name으로만 전달합니다.
 
+## DiffusionGemma 26B A4B 실행 메모
+
+`google/diffusiongemma-26B-A4B-it`는 Hugging Face model card와 vLLM recipe에서
+vLLM serving 방법을 제공하지만, 일반 vLLM 설치본이 항상 같은 기능을 포함하는 것은
+아닙니다. 공식 recipe는 `vLLM 0.24.0+`와 `vllm/vllm-openai:gemma` 이미지를
+기준으로 합니다. 현재 실행 환경의 vLLM이 `--diffusion-config`와
+`DiffusionGemmaForBlockDiffusion`을 지원하는지 먼저 확인하세요.
+
+공식 recipe 기준으로 필요한 핵심 옵션:
+
+```bash
+vllm serve google/diffusiongemma-26B-A4B-it \
+  --tensor-parallel-size 8 \
+  --gpu-memory-utilization 0.85 \
+  --max-model-len 262144 \
+  --max-num-seqs 4 \
+  --generation-config vllm \
+  --hf-overrides '{"diffusion_sampler":"entropy_bound","diffusion_entropy_bound":0.1}' \
+  --diffusion-config '{"canvas_length":256}' \
+  --enable-chunked-prefill
+```
+
+Turing 계열 GPU 또는 `head_dim=256`에서 attention backend 문제가 나면 다음 옵션도
+함께 사용합니다.
+
+```bash
+--attention-backend TRITON_ATTN
+```
+
+이 프로젝트는 모델 metadata에서 DiffusionGemma의 중첩 `text_config`를 읽고,
+Studio가 해당 모델을 로드할 때 위 diffusion 관련 vLLM 옵션을 자동으로 추가합니다.
+단, vLLM 패키지 자체가 DiffusionGemma를 지원하지 않으면 앱 설정만으로는 실행할 수
+없습니다. 그 경우 vLLM의 Gemma/DiffusionGemma 지원 버전 또는 Google/vLLM recipe에서
+지정한 Docker image를 사용하세요.
+
+이 저장소가 테스트된 8x RTX 2080 8GB 환경에서는 weight shard가 GPU당 약 6.01GiB로
+분산됩니다. overhead와 activation까지 포함하면 `gpu_memory_utilization=0.90`에서는
+tight/OOM 위험이고, `0.98`에서도 GPU당 여유가 약 0.2GiB 수준입니다. 텍스트만, 낮은
+동시성, `float16`, `tensor_parallel_size=8`, `max_num_seqs=1-4`로만 실험하는 것을
+권장합니다. 이미지 입력까지 쓰려면 추가 multimodal buffer가 필요하므로 8GB 카드에서는
+실패 가능성이 높습니다.
+
 ## 선택적 TurboQuant
 
 TurboQuant 지원은 host process runner에서만 사용할 수 있습니다.
