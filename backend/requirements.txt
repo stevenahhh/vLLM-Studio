@@ -1,0 +1,22 @@
+# vLLM Studio — control plane (FastAPI) requirements.
+# NOTE: this host already has all of these installed system-wide; the file exists
+# for reproducibility on a fresh box. Versions are lower bounds known to work.
+
+# --- control plane ---
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+aiohttp>=3.9
+huggingface_hub>=0.34       # model search / download / cache scan
+nvidia-ml-py>=12.0          # provides the `pynvml` module for GPU telemetry
+transformers>=4.44          # config.json parsing fallback (no model load needed)
+
+# --- inference engine (heavy; must match your CUDA/driver) ---
+# On this host: vllm==0.23.0, torch==2.11.0+cu128 are already installed.
+# Reinstalling can break the CUDA match — only do this on a fresh environment:
+#   pip install "vllm>=0.6"
+vllm>=0.6
+
+# --- optional KV-cache compression ---
+# Enable with VLLM_TURBOQUANT=1 after installing from upstream:
+#   pip install "turboquant[vllm,triton] @ git+https://github.com/0xSero/turboquant.git"

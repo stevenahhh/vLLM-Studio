@@ -1,0 +1,63 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+!**/.env.example
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.python-version
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Backend runtime state
+data/*.json
+!data/.gitkeep
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/coverage/
+frontend/.turbo/
+frontend/*.tsbuildinfo
+frontend/next-env.d.ts
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Model/cache artifacts
+hf-cache/
+models/
+*.safetensors
+*.gguf
+*.bin
+*.pt
+*.pth
+*.onnx
+
+# Local agent/index runtime state
+.omo/
+.codegraph
+.git-metadata-backup/
